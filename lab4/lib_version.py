@@ -1,154 +1,81 @@
 import os
-import gzip
-import pickle
+# Отключаем GPU
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1" 
+
 import numpy as np
-from urllib import request
-
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-
+import tensorflow as tf
+from tensorflow.keras import layers, models
+from tensorflow.keras.optimizers import Adam
 import matplotlib.pyplot as plt
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
-# ===== Скачивание и сохранение данных MNIST =====
-filename = [
-    ("train_images", "train-images-idx3-ubyte.gz"),
-    ("train_labels", "train-labels-idx1-ubyte.gz"),
-    ("test_images", "t10k-images-idx3-ubyte.gz"),
-    ("test_labels", "t10k-labels-idx1-ubyte.gz")
-]
-
-def download_mnist():
-    base_url = "http://yann.lecun.com/exdb/mnist/"
-    for name in filename:
-        print("Downloading " + name[1] + "...")
-        request.urlretrieve(base_url + name[1], name[1])
-    print("Download complete.")
-
-def save_mnist():
-    mnist = {}
-    for name in filename[:2]:
-        with gzip.open(name[1], 'rb') as f:
-            mnist[name[0]] = np.frombuffer(f.read(), np.uint8, offset=16).reshape(-1, 28*28)
-    for name in filename[-2:]:
-        with gzip.open(name[1], 'rb') as f:
-            mnist[name[0]] = np.frombuffer(f.read(), np.uint8, offset=8)
-    with open("../mnist.pkl", 'wb') as f:
-        pickle.dump(mnist, f)
-    print("Save complete.")
-
-def load():
-    with open("../mnist.pkl",'rb') as f:
-        mnist = pickle.load(f)
-    return mnist["training_images"], mnist["training_labels"], mnist["test_images"], mnist["test_labels"]
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+from keras.api.datasets import mnist
 
 
-# ===== Загрузка сохранённого датасета =====
-class MNISTDataset(Dataset):
-    def __init__(self, data, labels):
-        self.data = torch.tensor(data, dtype=torch.float32).reshape(-1, 1, 28, 28) / 255.0
-        self.labels = torch.tensor(labels, dtype=torch.long)
+# Предобработка данных
+def preprocess_data(train_images, train_labels, test_images, test_labels):
+    # Нормализация и добавление размерности канала
+    train_images = train_images.reshape((-1, 28, 28, 1)).astype('float32') / 255.0
+    test_images = test_images.reshape((-1, 28, 28, 1)).astype('float32') / 255.0
+    
+    # Преобразование меток в one-hot encoding
+    train_labels = tf.keras.utils.to_categorical(train_labels, 10)
+    test_labels = tf.keras.utils.to_categorical(test_labels, 10)
+    return train_images, train_labels, test_images, test_labels
 
-    def __len__(self):
-        return len(self.labels)
+# Создание модели LeNet-5
+def create_lenet5():
+    model = models.Sequential([
+        layers.Conv2D(6, (5, 5), activation='tanh', input_shape=(28, 28, 1)),
+        layers.AveragePooling2D((2, 2)),
+        layers.Conv2D(16, (5, 5), activation='tanh'),
+        layers.AveragePooling2D((2, 2)),
+        layers.Flatten(),
+        layers.Dense(120, activation='tanh'),
+        layers.Dense(84, activation='tanh'),
+        layers.Dense(10, activation='softmax')
+    ])
+    return model
 
-    def __getitem__(self, idx):
-        return self.data[idx], self.labels[idx]
 
-# ===== LeNet-5 =====
-class LeNet5(nn.Module):
-    def __init__(self):
-        super(LeNet5, self).__init__()
-        self.conv1 = nn.Conv2d(1, 6, kernel_size=5)
-        self.pool1 = nn.AvgPool2d(2)
-        self.conv2 = nn.Conv2d(6, 16, kernel_size=5)
-        self.pool2 = nn.AvgPool2d(2)
-        self.fc1 = nn.Linear(16 * 4 * 4, 120)
-        self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, 10)
+def main():
+    # Загрузка данных    
+    (train_images, train_labels), (test_images, test_labels) = mnist.load_data()
+    
+    # Предобработка
+    train_images, train_labels, test_images, test_labels = preprocess_data(
+        train_images, train_labels, test_images, test_labels
+    )
+    
+    # Создаём оптимизатор с нужным learning rate
+    optimizer = Adam(learning_rate=0.01)
 
-    def forward(self, x):
-        x = self.pool1(torch.tanh(self.conv1(x)))
-        x = self.pool2(torch.tanh(self.conv2(x)))
-        x = x.view(-1, 16 * 4 * 4)
-        x = torch.tanh(self.fc1(x))
-        x = torch.tanh(self.fc2(x))
-        x = self.fc3(x)
-        return x
+    # Создание и обучение модели
+    model = create_lenet5()
+    model.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
+    history = model.fit(train_images, train_labels, epochs=10, batch_size=64, validation_split=0.2)
+    
+    # Оценка модели
+    test_loss, test_acc = model.evaluate(test_images, test_labels)
+    print(f'Test accuracy: {test_acc:.4f}')
+    
+    # Получаем предсказания для всех тестовых данных
+    test_pred_probs = model.predict(test_images)
+    test_pred_classes = np.argmax(test_pred_probs, axis=1)
+    test_true_classes = np.argmax(test_labels, axis=1)
 
-# ===== Обучение =====
-def train_model(model, train_loader, criterion, optimizer, device):
-    model.train()
-    for epoch in range(5):
-        running_loss = 0.0
-        for i, (images, labels) in enumerate(train_loader):
-            images, labels = images.to(device), labels.to(device)
+    cm = confusion_matrix(test_true_classes, test_pred_classes)
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=range(10), yticklabels=range(10))
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('Confusion Matrix')
+    plt.tight_layout()
+    plt.savefig("lib_cm.png")
+    plt.close()
+    print("Confusion matrix - 'lib_cm.png'")
 
-            optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
 
-            running_loss += loss.item()
-        print(f"Epoch [{epoch + 1}/5], Loss: {running_loss / len(train_loader):.4f}")
-
-# ===== Тестирование =====
-def test_model(model, test_loader, device):
-    model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for images, labels in test_loader:
-            images, labels = images.to(device), labels.to(device)
-            outputs = model(images)
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-    print(f"Test Accuracy: {100 * correct / total:.2f}%")
-
-def plot_confusion_matrix(model, test_loader, device):
-    model.eval()
-    all_preds = []
-    all_labels = []
-    with torch.no_grad():
-        for images, labels in test_loader:
-            images = images.to(device)
-            outputs = model(images)
-            _, preds = torch.max(outputs, 1)
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.numpy())
-
-    cm = confusion_matrix(all_labels, all_preds)
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=list(range(10)))
-    disp.plot(cmap=plt.cm.Blues)
-    plt.title("Confusion Matrix")
-    plt.savefig("confusion_matrix.png")  # Сохранить в файл
-    plt.close()  # Закрыть фигуру
-
-# ===== Основной запуск =====
 if __name__ == "__main__":
-    if not os.path.exists("../mnist.pkl"):
-        download_mnist()
-        save_mnist()
-
-    with open("../mnist.pkl", 'rb') as f:
-        mnist = pickle.load(f)
-
-    # X_train, Y_train, X_test, Y_test = load()
-    train_dataset = MNISTDataset(mnist["training_images"], mnist["training_labels"])
-    test_dataset = MNISTDataset(mnist["test_images"], mnist["test_labels"])
-
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)  
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = LeNet5().to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-    train_model(model, train_loader, criterion, optimizer, device)
-    test_model(model, test_loader, device)
-    plot_confusion_matrix(model, test_loader, device)
+    main()
